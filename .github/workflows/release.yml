@@ -1,0 +1,193 @@
+name: Release C ABI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terrakit-c-abi-release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Check release version
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Check for an existing release
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(cargo run --quiet --locked -p terrakit-xtask -- version)"
+          tag="terrakit-v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "Version $version has already been released."
+          elif git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            # An existing tag can be retried only at the same source commit.
+            tagged_commit="$(git rev-parse "$tag^{}")"
+            if [ "$tagged_commit" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $tag exists at $tagged_commit, but has no release. Resolve that tag before releasing again."
+              exit 1
+            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  validate:
+    name: Validate release and generate C header
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Run release checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+
+      - name: Generate and validate release header
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cbindgen --version 0.29.0 --locked
+          mkdir -p bindings/c/include
+          cbindgen \
+            --config engine/terrakit-c-api/cbindgen.toml \
+            --crate terrakit-c-api \
+            --output bindings/c/include/terrakit.h
+          cargo run --quiet --locked -p terrakit-xtask -- check-header --header bindings/c/include/terrakit.h
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only \
+            -I bindings/c/include tests/c_abi_header_smoke.c
+          c++ -std=c++17 -Wall -Wextra -Werror -fsyntax-only -x c++ \
+            -I bindings/c/include tests/c_abi_header_smoke.c
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terrakit-generated-header
+          path: bindings/c/include/terrakit.h
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [prepare, validate]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: terrakit-generated-header
+          path: bindings/c/include
+
+      - name: Build shared and static C ABI libraries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          rustup target add "$TARGET"
+          cargo build --locked --release -p terrakit-c-api --all-features --target "$TARGET"
+
+      - name: Verify exports and package binaries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo run --quiet --locked -p terrakit-xtask -- package \
+            --target "$TARGET" \
+            --artifact-dir "target/$TARGET/release" \
+            --header bindings/c/include/terrakit.h \
+            --output-dir dist/archives
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terrakit-c-abi-${{ matrix.target }}
+          path: dist/archives/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [prepare, validate, build]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: terrakit-c-abi-*
+          path: release-assets
+          merge-multiple: true
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Check archive integrity
+        run: cargo run --quiet --locked -p terrakit-xtask -- verify-archives --directory release-assets --expected 4
+
+      - name: Write release notes
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          {
+            echo "TerraKit $VERSION"
+            echo
+            echo "C ABI binaries for Linux x86_64, Windows x86_64, macOS x86_64 and macOS ARM64."
+            echo "Each ZIP contains the generated C header, shared and static libraries,"
+            echo "a manifest with the ABI version, and SHA-256 hashes for packaged files."
+            echo "The matching .sha256 file verifies the archive download."
+          } > release-notes.md
+
+      - name: Create version tag and publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release create "$TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "TerraKit $VERSION" \
+            --notes-file release-notes.md \
+            --latest

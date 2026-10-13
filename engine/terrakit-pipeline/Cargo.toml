@@ -1,0 +1,10 @@
+[package]
+name = "terrakit-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+readme.workspace = true
+
+[dependencies]
+terrakit-core.workspace = true

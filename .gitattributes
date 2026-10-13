@@ -1,0 +1,13 @@
+# Keep text file normalization stable across Windows, macOS, and Linux.
+* text=auto eol=lf
+
+# Generated or compiled artifacts are binary and should not be EOL-normalized.
+*.a binary -eol
+*.dll binary -eol
+*.dylib binary -eol
+*.exe binary -eol
+*.lib binary -eol
+*.o binary -eol
+*.obj binary -eol
+*.pdb binary -eol
+*.so binary -eol

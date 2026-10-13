@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+
+jobs:
+  quality:
+    name: Rust and C header
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+
+      - name: Generate C header
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cbindgen --version 0.29.0 --locked
+          mkdir -p bindings/c/include
+          cbindgen \
+            --config engine/terrakit-c-api/cbindgen.toml \
+            --crate terrakit-c-api \
+            --output bindings/c/include/terrakit.h
+          cargo run --quiet --locked -p terrakit-xtask -- check-header --header bindings/c/include/terrakit.h
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only \
+            -I bindings/c/include tests/c_abi_header_smoke.c
+          c++ -std=c++17 -Wall -Wextra -Werror -fsyntax-only -x c++ \
+            -I bindings/c/include tests/c_abi_header_smoke.c
+
+  platforms:
+    name: Test on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Test workspace
+        run: cargo test --workspace --all-features --locked
+      - name: Build C ABI
+        run: cargo build -p terrakit-c-api --all-features --locked
+
+  gate:
+    name: CI passed
+    if: always()
+    needs: [quality, platforms]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          PLATFORMS: ${{ needs.platforms.result }}
+        shell: bash
+        run: |
+          [ "$QUALITY" = success ] && [ "$PLATFORMS" = success ]

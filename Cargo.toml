@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = [
+    "engine/*",
+    "generation/*",
+    "tools/xtask",
+]
+
+[workspace.package]
+version = "0.0.3"
+edition = "2024"
+rust-version = "1.87"
+description = "Deterministic terrain generation primitives, pipelines, runtime, and C ABI."
+readme = "README.md"
+
+[workspace.dependencies]
+terrakit-core = { path = "engine/terrakit-core" }
+terrakit-pipeline = { path = "engine/terrakit-pipeline" }
+terrakit-runtime = { path = "engine/terrakit-runtime" }
+terrakit-algorithms = { path = "generation/terrakit-algorithms" }
+terrakit-builtins = { path = "generation/terrakit-builtins" }
+
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }

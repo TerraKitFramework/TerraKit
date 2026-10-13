@@ -1,0 +1,17 @@
+/target/
+/build/
+/dist/
+
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+.DS_Store
+Thumbs.db
+
+.idea/
+.vscode/
+
+# The public C header is generated from terrakit-c-api during CI and release.
+/bindings/
